@@ -6,6 +6,8 @@ import { supabase } from '@/lib/supabase'
 import { CATEGORIES } from '@/lib/types'
 import type { Location } from '@/lib/types'
 
+type CatalogMatch = { id: string; name: string; brand: string | null }
+
 function AddItemForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -33,6 +35,16 @@ function AddItemForm() {
   const [newLocName, setNewLocName] = useState('')
   const [addingLoc, setAddingLoc] = useState(false)
 
+  // Existing-item match state
+  const [catalogMatches, setCatalogMatches] = useState<CatalogMatch[]>([])
+  const [pickedItem, setPickedItem] = useState<CatalogMatch | null>(null)
+  const [originalBrand, setOriginalBrand] = useState<string | null>(null)
+
+  // Whether we're adding a lot to an existing item (either via scan/URL or user picked one)
+  const effectiveLotOnly = lotOnly || !!pickedItem
+  const effectiveItemId = paramItemId ?? pickedItem?.id ?? null
+  const effectiveItemName = lotOnly ? paramItemName : pickedItem?.name ?? name
+
   useEffect(() => {
     supabase
       .from('locations')
@@ -41,6 +53,40 @@ function AddItemForm() {
       .order('name')
       .then(({ data }) => { if (data) setLocations(data as Location[]) })
   }, [])
+
+  // Fetch brand for lotOnly (item_id from URL, e.g. recipe cart button)
+  useEffect(() => {
+    if (!paramItemId) return
+    supabase
+      .from('items')
+      .select('brand')
+      .eq('id', paramItemId)
+      .single()
+      .then(({ data }) => {
+        if (data) {
+          setBrand(data.brand ?? '')
+          setOriginalBrand(data.brand ?? '')
+        }
+      })
+  }, [paramItemId])
+
+  // Search catalog for name matches (debounced while typing, immediate on mount if pre-filled)
+  useEffect(() => {
+    if (lotOnly || pickedItem) return
+    const term = name.trim()
+    if (term.length < 2) { setCatalogMatches([]); return }
+
+    const delay = paramName && name === paramName ? 0 : 300
+    const timer = setTimeout(async () => {
+      const { data } = await supabase
+        .from('items')
+        .select('id, name, brand')
+        .ilike('name', `%${term}%`)
+        .limit(5)
+      setCatalogMatches((data ?? []) as CatalogMatch[])
+    }, delay)
+    return () => clearTimeout(timer)
+  }, [name, lotOnly, pickedItem, paramName])
 
   async function addLocation() {
     if (!newLocName.trim()) return
@@ -59,13 +105,13 @@ function AddItemForm() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!lotOnly && !name.trim()) return
+    if (!effectiveLotOnly && !name.trim()) return
     setSaving(true)
     setError(null)
     try {
-      let finalItemId = paramItemId
+      let finalItemId = effectiveItemId
 
-      if (!lotOnly) {
+      if (!effectiveLotOnly) {
         const { data: itemRow, error: itemErr } = await supabase
           .from('items')
           .insert({
@@ -78,17 +124,27 @@ function AddItemForm() {
           .single()
         if (itemErr) throw itemErr
         finalItemId = itemRow.id
+      } else {
+        const updates: Record<string, string> = {}
+        const newBrand = brand.trim()
+        if (newBrand !== (originalBrand ?? '')) updates.brand = newBrand || ''
+        if (pickedItem && barcode.trim()) {
+          const { data: existing } = await supabase.from('items').select('barcode').eq('id', effectiveItemId!).single()
+          if (existing && !existing.barcode) updates.barcode = barcode.trim()
+        }
+        if (Object.keys(updates).length > 0) {
+          await supabase.from('items').update(updates).eq('id', effectiveItemId!)
+        }
       }
 
-      const lotData: Record<string, unknown> = {
+      const { error: lotErr } = await supabase.from('inventory_lots').insert({
         item_id: finalItemId,
         quantity_remaining: 1,
         canonical_unit: 'unit',
         ...(sizeLabel.trim() && { size_label: sizeLabel.trim() }),
         ...(expirationDate && { expiration_date: expirationDate }),
         ...(locationId && { location_id: locationId }),
-      }
-      const { error: lotErr } = await supabase.from('inventory_lots').insert(lotData)
+      })
       if (lotErr) throw lotErr
 
       router.push('/')
@@ -108,7 +164,7 @@ function AddItemForm() {
             </svg>
           </button>
           <h1 className="text-lg font-semibold">
-            {lotOnly ? `Add Stock — ${paramItemName}` : 'Add Item'}
+            {effectiveLotOnly ? `Add Stock — ${effectiveItemName}` : 'Add Item'}
           </h1>
         </div>
       </div>
@@ -116,7 +172,7 @@ function AddItemForm() {
       <form onSubmit={handleSubmit} className="p-4 flex flex-col gap-4">
         {error && <div className="p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
 
-        {fromScan && !lotOnly && (
+        {fromScan && !effectiveLotOnly && (
           <div className="p-3 bg-blue-50 rounded-lg flex items-center gap-2 text-sm text-blue-800">
             <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -125,6 +181,27 @@ function AddItemForm() {
           </div>
         )}
 
+        {/* Existing item picked by user */}
+        {pickedItem && (
+          <div className="p-3 bg-green-50 rounded-lg flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-green-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <div className="flex-1">
+              <p className="text-sm text-green-800 font-medium">{pickedItem.name}</p>
+              <p className="text-xs text-green-600">Adding stock to existing item</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => { setPickedItem(null); setCatalogMatches([]) }}
+              className="text-xs text-green-700 underline"
+            >
+              Change
+            </button>
+          </div>
+        )}
+
+        {/* Existing item from URL (scan barcode match) */}
         {lotOnly && (
           <div className="p-3 bg-green-50 rounded-lg flex items-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-green-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -134,17 +211,47 @@ function AddItemForm() {
           </div>
         )}
 
-        {!lotOnly && (
+        {/* Brand — editable even when adding stock to an existing item */}
+        {effectiveLotOnly && (
+          <Field label="Brand">
+            <input value={brand} onChange={e => setBrand(e.target.value)} placeholder="Optional" className="input" />
+          </Field>
+        )}
+
+        {/* Item fields — hidden when using an existing item */}
+        {!effectiveLotOnly && (
           <>
             <Field label="Name *">
               <input
                 required
                 value={name}
-                onChange={e => setName(e.target.value)}
+                onChange={e => { setName(e.target.value); setPickedItem(null) }}
                 placeholder="e.g. Chicken Broth"
                 className="input"
               />
             </Field>
+
+            {/* Catalog match suggestions */}
+            {catalogMatches.length > 0 && (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex flex-col gap-2">
+                <p className="text-xs font-semibold text-amber-700">Already in your catalog — use an existing item?</p>
+                {catalogMatches.map(match => (
+                  <button
+                    key={match.id}
+                    type="button"
+                    onClick={() => { setPickedItem(match); setBrand(match.brand ?? ''); setOriginalBrand(match.brand ?? ''); setCatalogMatches([]) }}
+                    className="w-full text-left px-3 py-2 text-sm bg-white rounded-lg border border-amber-200 flex items-center justify-between active:bg-amber-50 transition-colors"
+                  >
+                    <span>
+                      <span className="font-medium text-gray-900">{match.name}</span>
+                      {match.brand && <span className="text-gray-400 ml-1.5 text-xs">{match.brand}</span>}
+                    </span>
+                    <span className="text-xs text-amber-600 font-semibold shrink-0 ml-2">Use this →</span>
+                  </button>
+                ))}
+                <p className="text-xs text-amber-600">Or keep editing the name to create something new.</p>
+              </div>
+            )}
 
             <Field label="Brand">
               <input value={brand} onChange={e => setBrand(e.target.value)} placeholder="Optional" className="input" />
@@ -203,7 +310,7 @@ function AddItemForm() {
         </Field>
 
         <button type="submit" disabled={saving} className="btn-primary py-3 text-base mt-2">
-          {saving ? 'Saving…' : lotOnly ? 'Add to Inventory' : 'Save Item'}
+          {saving ? 'Saving…' : effectiveLotOnly ? 'Add to Inventory' : 'Save Item'}
         </button>
       </form>
 

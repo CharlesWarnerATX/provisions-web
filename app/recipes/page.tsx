@@ -41,7 +41,7 @@ export default function RecipesPage() {
     <div className="max-w-lg mx-auto">
       <div className="sticky top-0 z-10 bg-green-700 text-white shadow-md">
         <div className="flex items-center gap-3 px-4 py-3">
-          <button onClick={() => router.back()} className="p-1 hover:bg-green-600 active:bg-green-800 rounded" aria-label="Back">
+          <button onClick={() => router.push('/')} className="p-1 hover:bg-green-600 active:bg-green-800 rounded" aria-label="Back">
             <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
